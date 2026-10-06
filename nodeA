@@ -1,0 +1,895 @@
+#include <SPI.h>
+#include <LoRa.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+// ================= WIFI =================
+
+const char* AP_NAME = "LoRa-Node-A";
+const char* AP_PASSWORD = "12345678";
+
+IPAddress local_IP(192, 168, 10, 1);
+IPAddress gateway(192, 168, 10, 1);
+IPAddress subnet(255, 255, 255, 0);
+
+// ================= LORA =================
+
+#define LORA_SS    D1
+#define LORA_RST   D2
+#define LORA_DIO0  D0
+
+ESP8266WebServer server(80);
+
+// ================= ENCRYPTION =================
+
+const String SECRET_KEY = "LoRaSecret2026";
+
+// ================= DATA =================
+
+String lastSent = "No message sent";
+String lastSentEncrypted = "No encrypted data";
+
+String lastReceived = "No message received";
+String lastReceivedEncrypted = "No encrypted data";
+
+int sentCount = 0;
+int receivedCount = 0;
+long lastRSSI = 0;
+
+// ================= ENCRYPT =================
+
+String encryptMessage(String text) {
+
+  String result = "";
+
+  for (int i = 0; i < text.length(); i++) {
+
+    byte encryptedByte =
+      text[i] ^ SECRET_KEY[i % SECRET_KEY.length()];
+
+    if (encryptedByte < 16) {
+      result += "0";
+    }
+
+    result += String(encryptedByte, HEX);
+  }
+
+  result.toUpperCase();
+
+  return result;
+}
+
+// ================= DECRYPT =================
+
+String decryptMessage(String hexText) {
+
+  String result = "";
+
+  for (int i = 0; i < hexText.length(); i += 2) {
+
+    if (i + 1 >= hexText.length()) {
+      break;
+    }
+
+    String byteString =
+      hexText.substring(i, i + 2);
+
+    byte encryptedByte =
+      strtol(byteString.c_str(), NULL, 16);
+
+    char originalChar =
+      encryptedByte ^
+      SECRET_KEY[(i / 2) % SECRET_KEY.length()];
+
+    result += originalChar;
+  }
+
+  return result;
+}
+
+// ================= JSON ESCAPE =================
+
+String jsonEscape(String text) {
+
+  text.replace("\\", "\\\\");
+  text.replace("\"", "\\\"");
+  text.replace("\n", "\\n");
+  text.replace("\r", "\\r");
+
+  return text;
+}
+
+// ================= STATUS =================
+
+void handleStatus() {
+
+  String json = "{";
+
+  json += "\"sent\":\"";
+  json += jsonEscape(lastSent);
+  json += "\",";
+
+  json += "\"sentEncrypted\":\"";
+  json += jsonEscape(lastSentEncrypted);
+  json += "\",";
+
+  json += "\"received\":\"";
+  json += jsonEscape(lastReceived);
+  json += "\",";
+
+  json += "\"receivedEncrypted\":\"";
+  json += jsonEscape(lastReceivedEncrypted);
+  json += "\",";
+
+  json += "\"sentCount\":";
+  json += String(sentCount);
+  json += ",";
+
+  json += "\"receivedCount\":";
+  json += String(receivedCount);
+  json += ",";
+
+  json += "\"rssi\":";
+  json += String(lastRSSI);
+
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+// ================= SEND =================
+
+void handleSend() {
+
+  if (!server.hasArg("msg")) {
+
+    server.send(
+      400,
+      "text/plain",
+      "Message missing"
+    );
+
+    return;
+  }
+
+  String message = server.arg("msg");
+
+  if (message.length() == 0) {
+
+    server.send(
+      400,
+      "text/plain",
+      "Empty message"
+    );
+
+    return;
+  }
+
+  // Encrypt
+  String encrypted = encryptMessage(message);
+
+  // Store for webpage
+  lastSent = message;
+  lastSentEncrypted = encrypted;
+
+  // Send encrypted data through LoRa
+  LoRa.idle();
+
+  LoRa.beginPacket();
+  LoRa.print(encrypted);
+  LoRa.endPacket();
+
+  LoRa.receive();
+
+  sentCount++;
+
+  Serial.println();
+  Serial.println("========== TRANSMISSION ==========");
+  Serial.print("Original:   ");
+  Serial.println(message);
+
+  Serial.print("Encrypted:  ");
+  Serial.println(encrypted);
+
+  Serial.println("==================================");
+
+  server.send(
+    200,
+    "application/json",
+    "{\"status\":\"sent\"}"
+  );
+}
+
+// ================= WEBPAGE =================
+
+void handleRoot() {
+
+  String page = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>LoRa Node A</title>
+
+<style>
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+
+  margin: 0;
+
+  background:
+    radial-gradient(circle at top,#12243b,#05080e 65%);
+
+  color: #e9faff;
+
+  font-family: Arial,sans-serif;
+
+}
+
+.header {
+
+  text-align: center;
+
+  padding: 25px 15px;
+
+  background: #0b1422;
+
+  border-bottom: 1px solid #00e5ff;
+
+  box-shadow: 0 0 20px #00e5ff22;
+
+}
+
+.header h1 {
+
+  margin: 0;
+
+  color: #00e5ff;
+
+  letter-spacing: 3px;
+
+}
+
+.header p {
+
+  color: #7892ad;
+
+  font-size: 12px;
+
+}
+
+.container {
+
+  max-width: 900px;
+
+  margin: auto;
+
+  padding: 18px;
+
+}
+
+.online {
+
+  color: #00ff9d;
+
+  margin-bottom: 18px;
+
+}
+
+.dot {
+
+  display: inline-block;
+
+  width: 9px;
+
+  height: 9px;
+
+  background: #00ff9d;
+
+  border-radius: 50%;
+
+  box-shadow: 0 0 12px #00ff9d;
+
+}
+
+.grid {
+
+  display: grid;
+
+  grid-template-columns:
+  repeat(3,1fr);
+
+  gap: 12px;
+
+}
+
+.card {
+
+  background: #0d1624;
+
+  border: 1px solid #203c57;
+
+  border-radius: 12px;
+
+  padding: 18px;
+
+}
+
+.card h3 {
+
+  margin: 0 0 10px;
+
+  font-size: 11px;
+
+  color: #7794af;
+
+}
+
+.value {
+
+  color: #00e5ff;
+
+  font-size: 24px;
+
+  font-weight: bold;
+
+}
+
+.section {
+
+  margin-top: 20px;
+
+}
+
+.title {
+
+  color: #00e5ff;
+
+  font-size: 13px;
+
+  letter-spacing: 1px;
+
+  margin-bottom: 9px;
+
+}
+
+.box {
+
+  background: #03060a;
+
+  border: 1px solid #203c57;
+
+  border-radius: 10px;
+
+  padding: 15px;
+
+  min-height: 60px;
+
+  word-break: break-word;
+
+}
+
+.encrypted {
+
+  color: #ffcf5a;
+
+  font-family: monospace;
+
+  font-size: 13px;
+
+}
+
+input {
+
+  width: 100%;
+
+  padding: 15px;
+
+  border-radius: 8px;
+
+  border: 1px solid #31516b;
+
+  background: #03060a;
+
+  color: white;
+
+  outline: none;
+
+  font-size: 15px;
+
+}
+
+input:focus {
+
+  border-color: #00e5ff;
+
+}
+
+button {
+
+  width: 100%;
+
+  margin-top: 12px;
+
+  padding: 15px;
+
+  border: 0;
+
+  border-radius: 8px;
+
+  background:
+  linear-gradient(90deg,#007bff,#00e5ff);
+
+  color: #001018;
+
+  font-weight: bold;
+
+  cursor: pointer;
+
+}
+
+.security {
+
+  margin-top: 20px;
+
+  padding: 15px;
+
+  border: 1px solid #263e59;
+
+  border-radius: 10px;
+
+  background: #0b1320;
+
+  color: #9db4c9;
+
+  font-size: 12px;
+
+}
+
+.footer {
+
+  text-align: center;
+
+  margin-top: 25px;
+
+  color: #536b82;
+
+  font-size: 10px;
+
+}
+
+@media(max-width:600px) {
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="header">
+
+<h1>◈ LORA NODE A</h1>
+
+<p>
+SECURE LONG-RANGE COMMUNICATION SYSTEM
+</p>
+
+</div>
+
+<div class="container">
+
+<div class="online">
+
+<span class="dot"></span>
+
+&nbsp; SYSTEM ONLINE · ENCRYPTED LINK
+
+</div>
+
+<div class="grid">
+
+<div class="card">
+
+<h3>MESSAGES SENT</h3>
+
+<div class="value"
+id="sentCount">0</div>
+
+</div>
+
+<div class="card">
+
+<h3>MESSAGES RECEIVED</h3>
+
+<div class="value"
+id="receivedCount">0</div>
+
+</div>
+
+<div class="card">
+
+<h3>RSSI</h3>
+
+<div class="value"
+id="rssi">N/A</div>
+
+</div>
+
+</div>
+
+
+<div class="section">
+
+<div class="title">
+TRANSMIT MESSAGE
+</div>
+
+<input
+id="messageInput"
+type="text"
+placeholder="Enter message..."
+autocomplete="off">
+
+<button onclick="sendMessage()">
+⚡ ENCRYPT & TRANSMIT
+</button>
+
+</div>
+
+
+<div class="section">
+
+<div class="title">
+PLAINTEXT TRANSMISSION
+</div>
+
+<div class="box"
+id="lastSent">
+No message sent
+</div>
+
+</div>
+
+
+<div class="section">
+
+<div class="title">
+🔐 ENCRYPTED TRANSMISSION
+</div>
+
+<div class="box encrypted"
+id="lastSentEncrypted">
+No encrypted data
+</div>
+
+</div>
+
+
+<div class="section">
+
+<div class="title">
+RECEIVED ENCRYPTED DATA
+</div>
+
+<div class="box encrypted"
+id="lastReceivedEncrypted">
+No encrypted data
+</div>
+
+</div>
+
+
+<div class="section">
+
+<div class="title">
+DECRYPTED RECEIVED MESSAGE
+</div>
+
+<div class="box"
+id="lastReceived">
+No message received
+</div>
+
+</div>
+
+
+<div class="security">
+
+🔐 <b>SECURITY LAYER</b><br><br>
+
+XOR-based encryption<br>
+Shared secret key: configured on both nodes<br>
+Encrypted hexadecimal data is transmitted through LoRa.
+
+</div>
+
+
+<div class="footer">
+
+NODE A · 433 MHz · LIVE COMMUNICATION MONITOR
+
+</div>
+
+</div>
+
+
+<script>
+
+function updateStatus() {
+
+fetch('/status')
+
+.then(response => response.json())
+
+.then(data => {
+
+document.getElementById("sentCount")
+.innerText = data.sentCount;
+
+document.getElementById("receivedCount")
+.innerText = data.receivedCount;
+
+document.getElementById("rssi")
+.innerText =
+data.rssi == 0
+? "N/A"
+: data.rssi + " dBm";
+
+document.getElementById("lastSent")
+.innerText =
+data.sent;
+
+document.getElementById("lastSentEncrypted")
+.innerText =
+data.sentEncrypted;
+
+document.getElementById("lastReceivedEncrypted")
+.innerText =
+data.receivedEncrypted;
+
+document.getElementById("lastReceived")
+.innerText =
+data.received;
+
+})
+
+.catch(error => {
+
+console.log("Status error");
+
+});
+
+}
+
+
+function sendMessage() {
+
+let input =
+document.getElementById("messageInput");
+
+let message =
+input.value.trim();
+
+if(message === "") {
+
+alert("Please enter a message");
+
+return;
+
+}
+
+fetch(
+'/send?msg=' +
+encodeURIComponent(message)
+)
+
+.then(response => response.json())
+
+.then(data => {
+
+input.value = "";
+
+updateStatus();
+
+})
+
+.catch(error => {
+
+alert("Transmission failed");
+
+});
+
+}
+
+
+document
+.getElementById("messageInput")
+.addEventListener("keydown",function(event){
+
+if(event.key === "Enter") {
+
+sendMessage();
+
+}
+
+});
+
+
+setInterval(updateStatus,1500);
+
+updateStatus();
+
+</script>
+
+</body>
+
+</html>
+
+)rawliteral";
+
+  server.send(
+    200,
+    "text/html",
+    page
+  );
+}
+
+// ================= SETUP =================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(1000);
+
+  WiFi.mode(WIFI_AP);
+
+  WiFi.softAPConfig(
+    local_IP,
+    gateway,
+    subnet
+  );
+
+  WiFi.softAP(
+    AP_NAME,
+    AP_PASSWORD
+  );
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("      LORA NODE A ONLINE");
+  Serial.println("==============================");
+
+  Serial.print("WiFi: ");
+  Serial.println(AP_NAME);
+
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  LoRa.setPins(
+    LORA_SS,
+    LORA_RST,
+    LORA_DIO0
+  );
+
+  if(!LoRa.begin(433E6)) {
+
+    Serial.println(
+      "LoRa initialization failed!"
+    );
+
+    while(true) {
+      delay(1000);
+    }
+  }
+
+  LoRa.setSpreadingFactor(12);
+
+  LoRa.setSignalBandwidth(125E3);
+
+  LoRa.setCodingRate4(5);
+
+  LoRa.setSyncWord(0x12);
+
+  LoRa.receive();
+
+  server.on(
+    "/",
+    handleRoot
+  );
+
+  server.on(
+    "/status",
+    handleStatus
+  );
+
+  server.on(
+    "/send",
+    handleSend
+  );
+
+  server.begin();
+
+  Serial.println(
+    "LoRa initialized successfully"
+  );
+
+  Serial.println(
+    "Web server started"
+  );
+}
+
+// ================= LOOP =================
+
+void loop() {
+
+  server.handleClient();
+
+  int packetSize =
+    LoRa.parsePacket();
+
+  if(packetSize) {
+
+    String encryptedMessage = "";
+
+    while(LoRa.available()) {
+
+      encryptedMessage +=
+        (char)LoRa.read();
+
+    }
+
+    lastReceivedEncrypted =
+      encryptedMessage;
+
+    lastReceived =
+      decryptMessage(
+        encryptedMessage
+      );
+
+    lastRSSI =
+      LoRa.packetRssi();
+
+    receivedCount++;
+
+    Serial.println();
+    Serial.println("=========== RECEIVED ===========");
+
+    Serial.print("Encrypted: ");
+    Serial.println(
+      lastReceivedEncrypted
+    );
+
+    Serial.print("Decrypted: ");
+    Serial.println(
+      lastReceived
+    );
+
+    Serial.print("RSSI: ");
+    Serial.println(
+      lastRSSI
+    );
+
+    Serial.println(
+      "================================"
+    );
+
+    LoRa.receive();
+  }
+}
